@@ -1,0 +1,188 @@
+import numpy as np
+from dataclasses import dataclass
+from svgpathtools import svg2paths2, Line, Arc, Path
+
+# ---------------------------------------------------------
+# DATA STRUCTURES (MATCH PAPER DEFINITIONS)
+# ---------------------------------------------------------
+
+@dataclass
+class Vertex:
+    x: float
+    y: float
+
+@dataclass
+class Edge2D:
+    edge_type: str           # 'line', 'arc', 'circle'
+    vertices: list           # start & end vertices
+    samples: list            # sampled points for arcs/circles
+    bbox: tuple              # (xu, yu, xl, yl)
+    feature: str             # Px, Py, I, A
+
+
+# ---------------------------------------------------------
+# UTILITY FUNCTIONS
+# ---------------------------------------------------------
+
+def bounding_box(points):
+    xs = [p.real for p in points]
+    ys = [p.imag for p in points]
+    xu, xl = min(xs), max(xs)
+    yu, yl = max(ys), min(ys)
+    return (xu, yu, xl, yl)
+
+
+def classify_line_feature(p1, p2):
+    dx = abs(p1.real - p2.real)
+    dy = abs(p1.imag - p2.imag)
+
+    if dx < 1e-6:
+        return 'Py'
+    elif dy < 1e-6:
+        return 'Px'
+    else:
+        return 'I'
+
+
+# ---------------------------------------------------------
+# SVG VIEW EXTRACTION
+# ---------------------------------------------------------
+
+def load_svg_views(svg_path):
+    """
+    Assumption:
+    SVG groups (<g>) have ids containing:
+    'front', 'bottom', 'left'
+    """
+    paths, attributes, _ = svg2paths2(svg_path)
+
+    views = {'front': [], 'bottom': [], 'left': []}
+
+    for path, attr in zip(paths, attributes):
+        group_id = attr.get('id', '').lower()
+        if 'front' in group_id:
+            views['front'].append(path)
+        elif 'bottom' in group_id:
+            views['bottom'].append(path)
+        elif 'left' in group_id:
+            views['left'].append(path)
+
+    return views
+
+
+# ---------------------------------------------------------
+# EDGE EXTRACTION PER VIEW
+# ---------------------------------------------------------
+
+def extract_edges_from_view(paths):
+    edges = []
+
+    for path in paths:
+        for seg in path:
+
+            # ---------------- LINE ----------------
+            if isinstance(seg, Line):
+                p1, p2 = seg.start, seg.end
+                bbox = bounding_box([p1, p2])
+                feature = classify_line_feature(p1, p2)
+
+                edges.append(
+                    Edge2D(
+                        edge_type='line',
+                        vertices=[Vertex(p1.real, p1.imag),
+                                  Vertex(p2.real, p2.imag)],
+                        samples=[],
+                        bbox=bbox,
+                        feature=feature
+                    )
+                )
+
+            # ---------------- ARC ----------------
+            elif isinstance(seg, Arc):
+                p1, p2 = seg.start, seg.end
+                samples = [seg.point(t) for t in np.linspace(0, 1, 10)]
+                bbox = bounding_box(samples)
+
+                edges.append(
+                    Edge2D(
+                        edge_type='arc',
+                        vertices=[Vertex(p1.real, p1.imag),
+                                  Vertex(p2.real, p2.imag)],
+                        samples=[Vertex(p.real, p.imag) for p in samples],
+                        bbox=bbox,
+                        feature='A'
+                    )
+                )
+
+    return edges
+
+
+# ---------------------------------------------------------
+# CIRCLE EXTRACTION
+# ---------------------------------------------------------
+
+def extract_circles(paths):
+    circles = []
+
+    for path in paths:
+        if path.isclosed() and all(isinstance(seg, Arc) for seg in path):
+            samples = [path.point(t) for t in np.linspace(0, 1, 20)]
+            bbox = bounding_box(samples)
+
+            circles.append(
+                Edge2D(
+                    edge_type='circle',
+                    vertices=[],
+                    samples=[Vertex(p.real, p.imag) for p in samples],
+                    bbox=bbox,
+                    feature='A'
+                )
+            )
+
+    return circles
+
+
+# ---------------------------------------------------------
+# MAIN PIPELINE (STEP 1 FROM PAPER)
+# ---------------------------------------------------------
+
+def extract_2d_edges(svg_path):
+    views = load_svg_views(svg_path)
+
+    Ef = extract_edges_from_view(views['front'])
+    Eb = extract_edges_from_view(views['bottom'])
+    El = extract_edges_from_view(views['left'])
+
+    Ef += extract_circles(views['front'])
+    Eb += extract_circles(views['bottom'])
+    El += extract_circles(views['left'])
+
+    return {
+        'Ef': Ef,   # Front view edges
+        'Eb': Eb,   # Bottom view edges
+        'El': El    # Left view edges
+    }
+
+
+# ---------------------------------------------------------
+# PRINT RESULTS (DEBUG / VERIFICATION)
+# ---------------------------------------------------------
+
+def print_edges(edges, name):
+    print(f"\n{name} ({len(edges)} edges)")
+    for i, e in enumerate(edges):
+        print(f"Edge {i+1}: type={e.edge_type}, feature={e.feature}, bbox={e.bbox}")
+
+
+# ---------------------------------------------------------
+# RUN SCRIPT
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    svg_file = r"C:\Users\91936\Downloads\90917_4670b560_0000.svg"
+
+    edges = extract_2d_edges(svg_file)
+
+    print_edges(edges['Ef'], "Front View (Ef)")
+    print_edges(edges['Eb'], "Bottom View (Eb)")
+    print_edges(edges['El'], "Left View (El)")
