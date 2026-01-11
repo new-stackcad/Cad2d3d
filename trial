@@ -1,0 +1,116 @@
+import xml.etree.ElementTree as ET
+from svgpathtools import svg2paths, Line, Arc, CubicBezier, QuadraticBezier
+import matplotlib.pyplot as plt
+import numpy as np
+
+# =========================
+# INPUT SVG FILE
+# =========================
+svg_file = r"C:\Users\91936\Downloads\reconstruction_dataset\reconstruction_dataset\2_ABC\original_data\drawings_svg\00000904.svg"
+
+# =========================
+# STEP 1: RAW SVG INSPECTION
+# =========================
+print("\n================ RAW SVG CONTENT ================\n")
+
+tree = ET.parse(svg_file)
+root = tree.getroot()
+
+for elem in root.iter():
+    tag = elem.tag.split("}")[-1]
+    if tag in ["path", "line", "circle", "ellipse", "polyline", "polygon"]:
+        print(f"<{tag}>")
+        for k, v in elem.attrib.items():
+            print(f"   {k}: {v}")
+
+# =========================
+# STEP 2: GEOMETRY EXTRACTION
+# =========================
+paths, attributes = svg2paths(svg_file)
+
+lines = []
+arcs = []
+curves = []
+
+for path in paths:
+    for seg in path:
+        if isinstance(seg, Line):
+            lines.append({
+                "start": (seg.start.real, seg.start.imag),
+                "end": (seg.end.real, seg.end.imag),
+                "length": seg.length()
+            })
+
+        elif isinstance(seg, Arc):
+            arcs.append({
+                "start": (seg.start.real, seg.start.imag),
+                "end": (seg.end.real, seg.end.imag),
+                "center": (seg.center.real, seg.center.imag),
+                "radius": seg.radius,
+                "sweep": seg.sweep
+            })
+
+        elif isinstance(seg, (CubicBezier, QuadraticBezier)):
+            curves.append({
+                "type": type(seg).__name__,
+                "points": [(p.real, p.imag) for p in seg.bpoints()]
+            })
+
+# =========================
+# STEP 3: PRINT EXTRACTED DATA
+# =========================
+print("\n================ EXTRACTED LINES ================\n")
+for i, l in enumerate(lines):
+    print(f"Line {i}: start={l['start']} end={l['end']} length={l['length']:.2f}")
+
+print("\n================ EXTRACTED ARCS ================\n")
+for i, a in enumerate(arcs):
+    print(f"Arc {i}:")
+    print(f"   start={a['start']}")
+    print(f"   end={a['end']}")
+    print(f"   center={a['center']}")
+    print(f"   radius={a['radius']}")
+    print(f"   sweep={a['sweep']}")
+
+print("\n================ EXTRACTED CURVES ================\n")
+for i, c in enumerate(curves):
+    print(f"Curve {i}: type={c['type']} control_points={c['points']}")
+
+# =========================
+# STEP 4: VISUAL VERIFICATION
+# =========================
+plt.figure(figsize=(8, 8))
+
+# Plot lines
+for l in lines:
+    x = [l["start"][0], l["end"][0]]
+    y = [l["start"][1], l["end"][1]]
+    plt.plot(x, y)
+
+# Plot arcs (sampled)
+for a in arcs:
+    cx, cy = a["center"]
+    rx, ry = a["radius"] if isinstance(a["radius"], tuple) else (a["radius"], a["radius"])
+    theta = np.linspace(0, 2 * np.pi, 300)
+    x = cx + rx * np.cos(theta)
+    y = cy + ry * np.sin(theta)
+    plt.plot(x, y, linestyle="--")
+
+# Plot curves (sampled)
+for c in curves:
+    pts = np.array(c["points"])
+    plt.plot(pts[:, 0], pts[:, 1], linestyle=":")
+
+plt.gca().set_aspect("equal")
+plt.gca().invert_yaxis()  # VERY IMPORTANT for SVG coordinates
+plt.title("Extracted Geometry Overlay Check")
+plt.show()
+
+# =========================
+# FINAL SUMMARY
+# =========================
+print("\n================ SUMMARY ================\n")
+print(f"Total paths: {len(paths)}")
+print(f"Total lines: {len(lines)}")
+print(f"Total arcs: {len(arcs)}")
+print(f"Total curves: {len(curves)}")
