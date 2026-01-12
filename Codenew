@@ -14,7 +14,7 @@ svg_file = r"C:\Users\91936\Downloads\reconstruction_dataset\reconstruction_data
 paths, attributes = svg2paths(svg_file)
 
 # =========================
-# STEP 2: EXTRACT ALL EDGES (BASE CODE PRESERVED)
+# STEP 2: EXTRACT ALL EDGES
 # =========================
 edges = []
 
@@ -40,7 +40,7 @@ for path in paths:
         edges.append(edge)
 
 # =========================
-# STEP 3: VIEW EXTRACTION BY POSITION (NO IDS)
+# STEP 3: VIEW EXTRACTION BY POSITION
 # =========================
 all_x = []
 for e in edges:
@@ -88,7 +88,7 @@ for e in edges:
     e["bbox"] = compute_bbox(pts)
 
 # =========================
-# STEP 5: FEATURE CLASSIFICATION (TABLE 1)
+# STEP 5: FEATURE CLASSIFICATION
 # =========================
 EPS = 1e-3
 
@@ -127,20 +127,23 @@ for v, group in zip(["FRONT", "BOTTOM", "LEFT"], [Ef, Eb, El]):
         print(f"{i}: geom={e['geom']}, feature={e['feature']}, bbox={e['bbox']}")
 
 # =========================
-# STEP 8: VISUAL VERIFICATION
+# STEP 8: SEPARATE VIEW PLOTS
 # =========================
-plt.figure(figsize=(8, 8))
-colors = {"FRONT": "r", "BOTTOM": "g", "LEFT": "b"}
+def plot_view(edges, title):
+    plt.figure(figsize=(6, 6))
+    for e in edges:
+        x = [e["start"][0], e["end"][0]]
+        y = [e["start"][1], e["end"][1]]
+        plt.plot(x, y)
 
-for e in edges:
-    x = [e["start"][0], e["end"][0]]
-    y = [e["start"][1], e["end"][1]]
-    plt.plot(x, y, colors[e["view"]])
+    plt.gca().invert_yaxis()
+    plt.gca().set_aspect("equal")
+    plt.title(title)
+    plt.show()
 
-plt.gca().invert_yaxis()
-plt.gca().set_aspect("equal")
-plt.title("View Extraction, Edge Features & Bounding Box Verification")
-plt.show()
+plot_view(Ef, "Front View (X–Y)")
+plot_view(Eb, "Bottom View (X–Z projection in SVG)")
+plot_view(El, "Left View (Z–Y projection in SVG)")
 
 # =========================
 # FINAL SUMMARY
