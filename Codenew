@@ -1,170 +1,152 @@
+import xml.etree.ElementTree as ET
+from svgpathtools import svg2paths, Line, Arc, CubicBezier, QuadraticBezier
+import matplotlib.pyplot as plt
 import numpy as np
-from dataclasses import dataclass
-from svgpathtools import svg2paths2, Line, Arc
-from sklearn.cluster import KMeans
 
+# =========================
+# INPUT SVG FILE
+# =========================
+svg_file = r"C:\Users\91936\Downloads\reconstruction_dataset\reconstruction_dataset\2_ABC\original_data\drawings_svg\00000904.svg"
 
-# ------------------------------------------------
-# DATA STRUCTURES
-# ------------------------------------------------
+# =========================
+# STEP 1: LOAD SVG
+# =========================
+paths, attributes = svg2paths(svg_file)
 
-@dataclass
-class Vertex:
-    x: float
-    y: float
+# =========================
+# STEP 2: EXTRACT ALL EDGES (BASE CODE PRESERVED)
+# =========================
+edges = []
 
-@dataclass
-class Edge2D:
-    edge_type: str
-    vertices: list
-    samples: list
-    bbox: tuple
-    feature: str
+for path in paths:
+    for seg in path:
+        edge = {}
+        edge["type"] = type(seg).__name__
+        edge["start"] = (seg.start.real, seg.start.imag)
+        edge["end"] = (seg.end.real, seg.end.imag)
 
+        if isinstance(seg, Line):
+            edge["geom"] = "LINE"
 
-# ------------------------------------------------
-# UTILITIES
-# ------------------------------------------------
+        elif isinstance(seg, Arc):
+            edge["geom"] = "ARC"
+            edge["center"] = (seg.center.real, seg.center.imag)
+            edge["radius"] = seg.radius
 
-def bounding_box(points):
-    xs = [p.real for p in points]
-    ys = [p.imag for p in points]
-    return (min(xs), max(ys), max(xs), min(ys))
+        elif isinstance(seg, (CubicBezier, QuadraticBezier)):
+            edge["geom"] = "CURVE"
+            edge["ctrl"] = [(p.real, p.imag) for p in seg.bpoints()]
 
+        edges.append(edge)
 
-def classify_line_feature(p1, p2):
-    dx = abs(p1.real - p2.real)
-    dy = abs(p1.imag - p2.imag)
+# =========================
+# STEP 3: VIEW EXTRACTION BY POSITION (NO IDS)
+# =========================
+all_x = []
+for e in edges:
+    all_x.extend([e["start"][0], e["end"][0]])
 
-    if dx < 1e-6:
-        return 'Py'
-    elif dy < 1e-6:
-        return 'Px'
+xmin, xmax = min(all_x), max(all_x)
+width = xmax - xmin
+
+front_x = xmin + 0.33 * width
+bottom_x = xmin + 0.66 * width
+
+def assign_view(edge):
+    cx = 0.5 * (edge["start"][0] + edge["end"][0])
+    if cx < front_x:
+        return "FRONT"
+    elif cx < bottom_x:
+        return "BOTTOM"
     else:
-        return 'I'
+        return "LEFT"
 
+for e in edges:
+    e["view"] = assign_view(e)
 
-# ------------------------------------------------
-# RAW EDGE EXTRACTION (NO VIEW ASSUMPTIONS)
-# ------------------------------------------------
-
-def extract_all_edges(svg_path):
-    paths, _, _ = svg2paths2(svg_path)
-    edges = []
-
-    for path in paths:
-        for seg in path:
-
-            if isinstance(seg, Line):
-                p1, p2 = seg.start, seg.end
-                bbox = bounding_box([p1, p2])
-
-                edges.append(
-                    Edge2D(
-                        edge_type='line',
-                        vertices=[Vertex(p1.real, p1.imag),
-                                  Vertex(p2.real, p2.imag)],
-                        samples=[],
-                        bbox=bbox,
-                        feature=classify_line_feature(p1, p2)
-                    )
-                )
-
-            elif isinstance(seg, Arc):
-                p1, p2 = seg.start, seg.end
-                samples = [seg.point(t) for t in np.linspace(0, 1, 10)]
-                bbox = bounding_box(samples)
-
-                edges.append(
-                    Edge2D(
-                        edge_type='arc',
-                        vertices=[Vertex(p1.real, p1.imag),
-                                  Vertex(p2.real, p2.imag)],
-                        samples=[Vertex(p.real, p.imag) for p in samples],
-                        bbox=bbox,
-                        feature='A'
-                    )
-                )
-
-    return edges
-
-
-# ------------------------------------------------
-# VIEW CLUSTERING (CRITICAL FIX)
-# ------------------------------------------------
-
-def split_into_views(edges):
-    """
-    Cluster edges into 3 views using bounding box centers
-    """
-    centers = []
-    for e in edges:
-        xu, yu, xl, yl = e.bbox
-        cx = (xu + xl) / 2
-        cy = (yu + yl) / 2
-        centers.append([cx, cy])
-
-    centers = np.array(centers)
-
-    kmeans = KMeans(n_clusters=3, random_state=0).fit(centers)
-    labels = kmeans.labels_
-
-    clusters = {0: [], 1: [], 2: []}
-    for e, l in zip(edges, labels):
-        clusters[l].append(e)
-
-    # Sort clusters left → right → bottom
-    cluster_centers = {
-        k: np.mean(
-            [[(e.bbox[0] + e.bbox[2]) / 2,
-              (e.bbox[1] + e.bbox[3]) / 2] for e in v], axis=0)
-        for k, v in clusters.items()
-    }
-
-    sorted_clusters = sorted(cluster_centers.items(),
-                             key=lambda x: (x[1][1], x[1][0]))
-
-    Ef = clusters[sorted_clusters[0][0]]   # Front
-    Eb = clusters[sorted_clusters[1][0]]   # Bottom
-    El = clusters[sorted_clusters[2][0]]   # Left
-
-    return Ef, Eb, El
-
-
-# ------------------------------------------------
-# FULL PIPELINE (STEP 1)
-# ------------------------------------------------
-
-def extract_2d_edges(svg_path):
-    all_edges = extract_all_edges(svg_path)
-    Ef, Eb, El = split_into_views(all_edges)
-
+# =========================
+# STEP 4: VERTICES & BOUNDING BOXES
+# =========================
+def compute_bbox(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
     return {
-        'Ef': Ef,
-        'Eb': Eb,
-        'El': El
+        "ul": (min(xs), min(ys)),
+        "lr": (max(xs), max(ys))
     }
 
+for e in edges:
+    pts = [e["start"], e["end"]]
 
-# ------------------------------------------------
-# DEBUG PRINT
-# ------------------------------------------------
+    if e["geom"] != "LINE":
+        if "ctrl" in e:
+            pts += e["ctrl"]
+        if "center" in e:
+            pts.append(e["center"])
 
-def print_edges(name, edges):
-    print(f"\n{name} : {len(edges)} edges")
-    for i, e in enumerate(edges[:5]):
-        print(f"  {i+1}: {e.edge_type}, {e.feature}, bbox={e.bbox}")
+    e["vertices"] = pts
+    e["bbox"] = compute_bbox(pts)
 
+# =========================
+# STEP 5: FEATURE CLASSIFICATION (TABLE 1)
+# =========================
+EPS = 1e-3
 
-# ------------------------------------------------
-# RUN
-# ------------------------------------------------
+def classify_feature(edge):
+    if edge["geom"] != "LINE":
+        return "A"
 
-if __name__ == "__main__":
-    svg_file = r"C:\Users\91936\Downloads\90917_4670b560_0000.svg"
+    (x1, y1), (x2, y2) = edge["start"], edge["end"]
+    dx = abs(x2 - x1)
+    dy = abs(y2 - y1)
 
-    edges = extract_2d_edges(svg_file)
+    if dx < EPS and dy < EPS:
+        return "Pt"
+    if dy < EPS:
+        return "Px"
+    if dx < EPS:
+        return "Py"
+    return "I"
 
-    print_edges("Front View (Ef)", edges['Ef'])
-    print_edges("Bottom View (Eb)", edges['Eb'])
-    print_edges("Left View (El)", edges['El'])
+for e in edges:
+    e["feature"] = classify_feature(e)
+
+# =========================
+# STEP 6: GROUP EDGES BY VIEW
+# =========================
+Ef = [e for e in edges if e["view"] == "FRONT"]
+Eb = [e for e in edges if e["view"] == "BOTTOM"]
+El = [e for e in edges if e["view"] == "LEFT"]
+
+# =========================
+# STEP 7: CONSOLE VERIFICATION
+# =========================
+for v, group in zip(["FRONT", "BOTTOM", "LEFT"], [Ef, Eb, El]):
+    print(f"\n========== {v} VIEW ==========")
+    for i, e in enumerate(group):
+        print(f"{i}: geom={e['geom']}, feature={e['feature']}, bbox={e['bbox']}")
+
+# =========================
+# STEP 8: VISUAL VERIFICATION
+# =========================
+plt.figure(figsize=(8, 8))
+colors = {"FRONT": "r", "BOTTOM": "g", "LEFT": "b"}
+
+for e in edges:
+    x = [e["start"][0], e["end"][0]]
+    y = [e["start"][1], e["end"][1]]
+    plt.plot(x, y, colors[e["view"]])
+
+plt.gca().invert_yaxis()
+plt.gca().set_aspect("equal")
+plt.title("View Extraction, Edge Features & Bounding Box Verification")
+plt.show()
+
+# =========================
+# FINAL SUMMARY
+# =========================
+print("\n========== SUMMARY ==========")
+print(f"Total edges: {len(edges)}")
+print(f"Front view edges: {len(Ef)}")
+print(f"Bottom view edges: {len(Eb)}")
+print(f"Left view edges: {len(El)}")
