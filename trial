@@ -1,95 +1,120 @@
+import numpy as np
+import matplotlib.pyplot as plt
 from svgpathtools import svg2paths2, Line, Arc
 from dataclasses import dataclass
-import matplotlib.pyplot as plt
-import math
+import itertools
 
 # =========================
 # Data structure
 # =========================
 @dataclass
 class Edge2D:
-    points: list
-    feature: str
-    view: str
-    primitive: str
+    points: list          # [(x,y), ...]
+    bbox: tuple           # (xmin, ymin, xmax, ymax)
+    feature: str          # Px, Py, Pz, I, A
+    view: str             # F, B, L
+    primitive: str        # line / arc
 
 
 # =========================
-# Helpers
+# Utility functions
 # =========================
-def parse_svg_length(val):
-    return float(''.join(c for c in val if c.isdigit() or c == '.'))
+def bbox_from_points(pts):
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    return (min(xs), min(ys), max(xs), max(ys))
 
-def detect_view(cx, cy, W, H):
-    if cx < W/2 and cy < H/2:
-        return "F"      # Front
-    elif cx < W/2 and cy >= H/2:
-        return "B"      # Bottom
-    else:
-        return "L"      # Left
+def bbox_center(b):
+    return ((b[0]+b[2])/2, (b[1]+b[3])/2)
 
+def almost_equal(a,b,eps=1e-6):
+    return abs(a-b) < eps
+
+def points_close(p,q,eps=1e-6):
+    return almost_equal(p[0],q[0],eps) and almost_equal(p[1],q[1],eps)
+
+
+# =========================
+# Feature classification
+# =========================
 def classify_line(p1, p2, view, eps=1e-6):
-    dx = abs(p2[0] - p1[0])
-    dy = abs(p2[1] - p1[1])
+    dx = abs(p2[0]-p1[0])
+    dy = abs(p2[1]-p1[1])
 
     if dy < eps:
-        return "Px" if view in ["F", "B"] else "Pz"
+        return "Px" if view in ["F","B"] else "Pz"
     elif dx < eps:
         return "Py"
     else:
-        return "Inclined"
+        return "I"
 
-def are_collinear(e1, e2, tol=1e-6):
-    p1, p2 = e1.points[0], e1.points[-1]
-    p3, p4 = e2.points[0], e2.points[-1]
 
-    def cross(a, b, c):
-        return abs((b[0]-a[0])*(c[1]-a[1]) -
-                   (b[1]-a[1])*(c[0]-a[0]))
+# =========================
+# Collinear merging
+# =========================
+def collinear(e1, e2, eps=1e-6):
+    p1,p2 = e1.points[0], e1.points[-1]
+    p3,p4 = e2.points[0], e2.points[-1]
 
-    return cross(p1, p2, p3) < tol and cross(p1, p2, p4) < tol
+    v1 = np.array([p2[0]-p1[0], p2[1]-p1[1]])
+    v2 = np.array([p4[0]-p3[0], p4[1]-p3[1]])
 
-def merge_edges(edges):
+    if abs(np.cross(v1, v2)) > eps:
+        return False
+
+    return (
+        points_close(p1,p3) or points_close(p1,p4) or
+        points_close(p2,p3) or points_close(p2,p4)
+    )
+
+def merge_collinear(edges):
     merged = []
-    used = [False]*len(edges)
+    used = set()
 
-    for i, e in enumerate(edges):
-        if used[i]:
+    for i,e in enumerate(edges):
+        if i in used:
             continue
 
-        pts = e.points[:]
-        for j in range(i+1, len(edges)):
-            if used[j]:
-                continue
-            if (e.feature == edges[j].feature and
-                are_collinear(e, edges[j])):
-                pts += edges[j].points
-                used[j] = True
+        group = [e]
+        used.add(i)
 
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        new_edge = Edge2D(
-            points=[(min(xs), min(ys)), (max(xs), max(ys))],
-            feature=e.feature,
-            view=e.view,
-            primitive=e.primitive
-        )
-        merged.append(new_edge)
+        for j,f in enumerate(edges):
+            if j in used:
+                continue
+            if e.feature == f.feature and collinear(e,f):
+                group.append(f)
+                used.add(j)
+
+        pts = list(itertools.chain.from_iterable(
+            [(g.points[0], g.points[-1]) for g in group]
+        ))
+
+        unique = []
+        for p in pts:
+            if not any(points_close(p,q) for q in unique):
+                unique.append(p)
+
+        if len(unique) >= 2:
+            merged.append(
+                Edge2D(
+                    points=unique,
+                    bbox=bbox_from_points(unique),
+                    feature=e.feature,
+                    view=e.view,
+                    primitive="line"
+                )
+            )
 
     return merged
 
 
 # =========================
-# Step-1 Extraction
+# STEP-1 EXTRACTION (FIXED)
 # =========================
-def extract_edges(svg_path):
-    paths, _, svg_attr = svg2paths2(svg_path)
+def extract_edges_step1(svg_path):
+    paths, _, _ = svg2paths2(svg_path)
 
-    W = parse_svg_length(svg_attr["width"])
-    H = parse_svg_length(svg_attr["height"])
-
-    views = {"F": [], "B": [], "L": []}
-
+    raw_edges = []
     for path in paths:
         for seg in path:
             if isinstance(seg, Line):
@@ -105,37 +130,68 @@ def extract_edges(svg_path):
             else:
                 continue
 
-            cx = sum(p[0] for p in pts)/len(pts)
-            cy = sum(p[1] for p in pts)/len(pts)
-            view = detect_view(cx, cy, W, H)
+            raw_edges.append({
+                "points": pts,
+                "bbox": bbox_from_points(pts),
+                "primitive": primitive
+            })
 
-            feature = classify_line(pts[0], pts[-1], view) if primitive == "line" else "Arc"
+    # ---- VIEW SEPARATION (KEY FIX) ----
+    centers = np.array([bbox_center(e["bbox"]) for e in raw_edges])
+    x_sorted = np.argsort(centers[:,0])
+    clusters = np.array_split(x_sorted, 3)
 
-            views[view].append(
-                Edge2D(pts, feature, view, primitive)
+    views = {"F":[], "B":[], "L":[]}
+    for idxs,label in zip(clusters, ["F","B","L"]):
+        for i in idxs:
+            views[label].append(raw_edges[i])
+
+    Ef, Eb, El = [], [], []
+
+    for view,edges in views.items():
+        processed = []
+        for e in edges:
+            pts = e["points"]
+            if e["primitive"] == "line":
+                feature = classify_line(pts[0], pts[-1], view)
+            else:
+                feature = "A"
+
+            processed.append(
+                Edge2D(
+                    points=pts,
+                    bbox=e["bbox"],
+                    feature=feature,
+                    view=view,
+                    primitive=e["primitive"]
+                )
             )
 
-    # merge collinear lines per view
-    for v in views:
-        lines = [e for e in views[v] if e.primitive == "line"]
-        arcs  = [e for e in views[v] if e.primitive == "arc"]
-        views[v] = merge_edges(lines) + arcs
+        lines = [e for e in processed if e.primitive=="line"]
+        arcs  = [e for e in processed if e.primitive=="arc"]
+        processed = merge_collinear(lines) + arcs
 
-    return views
+        if view == "F": Ef = processed
+        if view == "B": Eb = processed
+        if view == "L": El = processed
+
+    return Ef, Eb, El
 
 
 # =========================
-# Verification Plot
+# 🔍 VISUAL VERIFICATION
 # =========================
 def plot_view(edges, title):
-    plt.figure()
+    plt.figure(figsize=(6,6))
     for e in edges:
         xs = [p[0] for p in e.points]
         ys = [p[1] for p in e.points]
         plt.plot(xs, ys, linewidth=2)
+
         cx = sum(xs)/len(xs)
         cy = sum(ys)/len(ys)
-        plt.text(cx, cy, e.feature, fontsize=9, color="red")
+        plt.text(cx, cy, f"{e.feature}", color="red", fontsize=10)
+
     plt.title(title)
     plt.axis("equal")
     plt.grid(True)
@@ -143,12 +199,17 @@ def plot_view(edges, title):
 
 
 # =========================
-# RUN
+# 🔁 RUN + VERIFY
 # =========================
-svg_path = r"YOUR_SVG_PATH_HERE.svg"
+if __name__ == "__main__":
+    svg_path = "your_file.svg"   # <<< CHANGE THIS
 
-views = extract_edges(svg_path)
+    Ef, Eb, El = extract_edges_step1(svg_path)
 
-plot_view(views["F"], "Front View (X–Y)")
-plot_view(views["B"], "Bottom View (X–Z)")
-plot_view(views["L"], "Left View (Z–Y)")
+    print("Front View edges:", len(Ef))
+    print("Bottom View edges:", len(Eb))
+    print("Left View edges:", len(El))
+
+    plot_view(Ef, "Front View (X–Y)")
+    plot_view(Eb, "Bottom View (X–Z)")
+    plot_view(El, "Left View (Z–Y)")
