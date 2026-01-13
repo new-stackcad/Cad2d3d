@@ -1,108 +1,82 @@
-import xml.etree.ElementTree as ET
-from svgpathtools import parse_path
-from shapely.geometry import box
-import numpy as np
-from sklearn.cluster import KMeans
-import copy
+from svgpathtools import svg2paths2, Line, Arc
+from dataclasses import dataclass
+import math
 
-SVG_FILE = "input.svg"   # your original svg
-OUTPUT_PREFIX = "view"   # view_1.svg, view_2.svg, view_3.svg
+@dataclass
+class Edge2D:
+    points: list
+    bbox: tuple
+    feature: str
+    view: str
+    primitive: str
 
-# ----------------------------------------------------
-# Compute bounding box of an SVG element
-# ----------------------------------------------------
-def element_bbox(elem):
-    tag = elem.tag.split('}')[-1]
+def bounding_box(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return ((min(xs), max(ys)), (max(xs), min(ys)))
 
-    if tag == "path":
-        path = parse_path(elem.attrib.get("d"))
-        xmin, xmax, ymin, ymax = path.bbox()
-        return box(xmin, ymin, xmax, ymax)
+def classify_line(p1, p2, view, eps=1e-6):
+    dx = abs(p2[0] - p1[0])
+    dy = abs(p2[1] - p1[1])
 
-    elif tag == "line":
-        x1, y1 = float(elem.attrib["x1"]), float(elem.attrib["y1"])
-        x2, y2 = float(elem.attrib["x2"]), float(elem.attrib["y2"])
-        return box(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+    if dy < eps:
+        return "Px" if view in ["F","B"] else "Pz"
+    elif dx < eps:
+        return "Py"
+    else:
+        return "I"
 
-    elif tag == "rect":
-        x = float(elem.attrib["x"])
-        y = float(elem.attrib["y"])
-        w = float(elem.attrib["width"])
-        h = float(elem.attrib["height"])
-        return box(x, y, x + w, y + h)
+def detect_view(cx, cy, w, h):
+    if cx < w/2 and cy < h/2:
+        return "F"
+    if cx < w/2 and cy > h/2:
+        return "B"
+    return "L"
 
-    elif tag in ["circle", "ellipse"]:
-        cx = float(elem.attrib["cx"])
-        cy = float(elem.attrib["cy"])
-        rx = float(elem.attrib.get("rx", elem.attrib.get("r")))
-        ry = float(elem.attrib.get("ry", elem.attrib.get("r")))
-        return box(cx - rx, cy - ry, cx + rx, cy + ry)
+def extract_edges(svg_path):
+    paths, attrs, svg_attr = svg2paths2(svg_path)
+    W, H = float(svg_attr["width"]), float(svg_attr["height"])
 
-    elif tag in ["polyline", "polygon"]:
-        points = np.array([
-            list(map(float, p.split(",")))
-            for p in elem.attrib["points"].strip().split()
-        ])
-        xmin, ymin = points.min(axis=0)
-        xmax, ymax = points.max(axis=0)
-        return box(xmin, ymin, xmax, ymax)
+    E_f, E_b, E_l = [], [], []
 
-    return None
+    for path in paths:
+        for seg in path:
+            pts = []
+            primitive = None
 
-# ----------------------------------------------------
-# Parse SVG
-# ----------------------------------------------------
-tree = ET.parse(SVG_FILE)
-root = tree.getroot()
-ns = {"svg": "http://www.w3.org/2000/svg"}
+            if isinstance(seg, Line):
+                p1 = (seg.start.real, seg.start.imag)
+                p2 = (seg.end.real, seg.end.imag)
+                pts = [p1, p2]
+                primitive = "line"
 
-elements = []
-centroids = []
+            elif isinstance(seg, Arc):
+                p1 = (seg.start.real, seg.start.imag)
+                p2 = (seg.end.real, seg.end.imag)
+                pm = seg.point(0.5)
+                pts = [p1, (pm.real, pm.imag), p2]
+                primitive = "arc"
 
-for elem in root.findall(".//*"):
-    bbox = element_bbox(elem)
-    if bbox:
-        elements.append((elem, bbox))
-        centroids.append(bbox.centroid.coords[0])
+            else:
+                continue
 
-centroids = np.array(centroids)
+            cx = sum(p[0] for p in pts) / len(pts)
+            cy = sum(p[1] for p in pts) / len(pts)
+            view = detect_view(cx, cy, W, H)
 
-# ----------------------------------------------------
-# Cluster into 3 views using spatial position
-# ----------------------------------------------------
-kmeans = KMeans(n_clusters=3, random_state=0).fit(centroids)
-labels = kmeans.labels_
+            if primitive == "line":
+                feature = classify_line(pts[0], pts[-1], view)
+            else:
+                feature = "A"
 
-clusters = {i: [] for i in range(3)}
-for (elem, bbox), label in zip(elements, labels):
-    clusters[label].append((elem, bbox))
+            bbox = bounding_box(pts)
+            edge = Edge2D(pts, bbox, feature, view, primitive)
 
-# ----------------------------------------------------
-# Write each cluster as a separate SVG
-# ----------------------------------------------------
-for idx, cluster in clusters.items():
-    new_root = copy.deepcopy(root)
+            if view == "F":
+                E_f.append(edge)
+            elif view == "B":
+                E_b.append(edge)
+            else:
+                E_l.append(edge)
 
-    # Remove all original graphic elements
-    for elem in new_root.findall(".//*"):
-        if elem.tag.split('}')[-1] in [
-            "path", "line", "rect", "circle",
-            "ellipse", "polyline", "polygon"
-        ]:
-            parent = elem.getparent() if hasattr(elem, "getparent") else None
-            if parent is not None:
-                parent.remove(elem)
-
-    # Add only cluster elements
-    for elem, _ in cluster:
-        new_root.append(copy.deepcopy(elem))
-
-    ET.ElementTree(new_root).write(
-        f"{OUTPUT_PREFIX}_{idx+1}.svg",
-        encoding="utf-8",
-        xml_declaration=True
-    )
-
-print("✅ Three SVG views successfully separated.")
-
-pip install svgpathtools shapely scikit-learn
+    return E_f, E_b, E_l
