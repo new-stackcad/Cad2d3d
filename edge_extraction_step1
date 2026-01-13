@@ -1,0 +1,237 @@
+from svgpathtools import svg2paths2, Line, Arc
+from dataclasses import dataclass
+import math
+
+# ===============================
+# Data structure
+# ===============================
+@dataclass
+class Edge2D:
+    points: list            # [(x,y), ...]
+    bbox: tuple             # ((xu,yu),(xl,yl))
+    feature: str            # Px, Py, Pz, I, A
+    view: str               # F, B, L
+    primitive: str          # line / arc
+
+
+# ===============================
+# Utilities
+# ===============================
+def parse_svg_length(val):
+    if val is None:
+        return None
+    return float(''.join(c for c in val if c.isdigit() or c == '.'))
+
+def bounding_box(points):
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return ((min(xs), max(ys)), (max(xs), min(ys)))
+
+def almost_equal(a, b, eps=1e-6):
+    return abs(a - b) < eps
+
+def points_close(p1, p2, eps=1e-6):
+    return almost_equal(p1[0], p2[0], eps) and almost_equal(p1[1], p2[1], eps)
+
+def vector(p1, p2):
+    return (p2[0] - p1[0], p2[1] - p1[1])
+
+def cross(v1, v2):
+    return v1[0]*v2[1] - v1[1]*v2[0]
+
+
+# ===============================
+# Feature classification
+# ===============================
+def classify_line(p1, p2, view, eps=1e-6):
+    dx = abs(p2[0] - p1[0])
+    dy = abs(p2[1] - p1[1])
+
+    if dy < eps:
+        return "Px" if view in ["F", "B"] else "Pz"
+    elif dx < eps:
+        return "Py"
+    else:
+        return "I"
+
+
+# ===============================
+# View detection
+# ===============================
+def detect_view(cx, cy, W, H):
+    if cx < W / 2 and cy < H / 2:
+        return "F"
+    elif cx < W / 2 and cy >= H / 2:
+        return "B"
+    else:
+        return "L"
+
+
+# ===============================
+# Collinearity + merge
+# ===============================
+def collinear(e1, e2):
+    p1, p2 = e1.points[0], e1.points[-1]
+    p3, p4 = e2.points[0], e2.points[-1]
+
+    v1 = vector(p1, p2)
+    v2 = vector(p3, p4)
+
+    if abs(cross(v1, v2)) > 1e-6:
+        return False
+
+    return (
+        points_close(p1, p3) or points_close(p1, p4) or
+        points_close(p2, p3) or points_close(p2, p4)
+    )
+
+def merge_edges(edges):
+    merged = []
+    used = set()
+
+    for i, e1 in enumerate(edges):
+        if i in used:
+            continue
+
+        group = [e1]
+        used.add(i)
+
+        for j, e2 in enumerate(edges):
+            if j in used:
+                continue
+            if collinear(e1, e2):
+                group.append(e2)
+                used.add(j)
+
+        if len(group) == 1:
+            merged.append(e1)
+        else:
+            pts = []
+            for g in group:
+                pts.extend([g.points[0], g.points[-1]])
+
+            # remove shared points
+            unique_pts = []
+            for p in pts:
+                if not any(points_close(p, q) for q in unique_pts):
+                    unique_pts.append(p)
+
+            if len(unique_pts) >= 2:
+                merged.append(
+                    Edge2D(
+                        points=unique_pts,
+                        bbox=bounding_box(unique_pts),
+                        feature=e1.feature,
+                        view=e1.view,
+                        primitive="line"
+                    )
+                )
+
+    return merged
+
+
+# ===============================
+# Duplicate removal
+# ===============================
+def remove_duplicates(edges):
+    unique = []
+    for e in edges:
+        if not any(
+            e.feature == u.feature and
+            e.view == u.view and
+            points_close(e.points[0], u.points[0]) and
+            points_close(e.points[-1], u.points[-1])
+            for u in unique
+        ):
+            unique.append(e)
+    return unique
+
+
+# ===============================
+# Main extraction (FULL STEP-1)
+# ===============================
+def extract_edges(svg_path):
+    paths, attrs, svg_attr = svg2paths2(svg_path)
+
+    W = parse_svg_length(svg_attr.get("width"))
+    H = parse_svg_length(svg_attr.get("height"))
+
+    if W is None or H is None:
+        raise ValueError("SVG width/height missing")
+
+    E_f, E_b, E_l = [], [], []
+
+    # -------- RAW EXTRACTION --------
+    for path in paths:
+        for seg in path:
+
+            points = []
+            primitive = None
+
+            if isinstance(seg, Line):
+                points = [
+                    (seg.start.real, seg.start.imag),
+                    (seg.end.real, seg.end.imag)
+                ]
+                primitive = "line"
+
+            elif isinstance(seg, Arc):
+                pm = seg.point(0.5)
+                points = [
+                    (seg.start.real, seg.start.imag),
+                    (pm.real, pm.imag),
+                    (seg.end.real, seg.end.imag)
+                ]
+                primitive = "arc"
+
+            else:
+                continue
+
+            cx = sum(p[0] for p in points) / len(points)
+            cy = sum(p[1] for p in points) / len(points)
+            view = detect_view(cx, cy, W, H)
+
+            if primitive == "line":
+                feature = classify_line(points[0], points[-1], view)
+            else:
+                feature = "A"
+
+            edge = Edge2D(
+                points=points,
+                bbox=bounding_box(points),
+                feature=feature,
+                view=view,
+                primitive=primitive
+            )
+
+            if view == "F":
+                E_f.append(edge)
+            elif view == "B":
+                E_b.append(edge)
+            else:
+                E_l.append(edge)
+
+    # -------- MERGE COLLINEAR --------
+    E_f = merge_edges(E_f)
+    E_b = merge_edges(E_b)
+    E_l = merge_edges(E_l)
+
+    # -------- REMOVE DUPLICATES --------
+    E_f = remove_duplicates(E_f)
+    E_b = remove_duplicates(E_b)
+    E_l = remove_duplicates(E_l)
+
+    return E_f, E_b, E_l
+
+
+# ===============================
+# RUN
+# ===============================
+if __name__ == "__main__":
+    svg_path = r"C:\Users\inp_madhupranavi\OneDrive - Ashok Leyland Ltd\Desktop\AL\Code_Trial\00000145.svg"
+
+    E_f, E_b, E_l = extract_edges(svg_path)
+
+    print("Front :", len(E_f))
+    print("Bottom:", len(E_b))
+    print("Left  :", len(E_l))
