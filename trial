@@ -1,116 +1,154 @@
-import xml.etree.ElementTree as ET
-from svgpathtools import svg2paths, Line, Arc, CubicBezier, QuadraticBezier
+from svgpathtools import svg2paths2, Line, Arc
+from dataclasses import dataclass
 import matplotlib.pyplot as plt
-import numpy as np
+import math
 
 # =========================
-# INPUT SVG FILE
+# Data structure
 # =========================
-svg_file = r"C:\Users\91936\Downloads\reconstruction_dataset\reconstruction_dataset\2_ABC\original_data\drawings_svg\00000904.svg"
+@dataclass
+class Edge2D:
+    points: list
+    feature: str
+    view: str
+    primitive: str
 
-# =========================
-# STEP 1: RAW SVG INSPECTION
-# =========================
-print("\n================ RAW SVG CONTENT ================\n")
-
-tree = ET.parse(svg_file)
-root = tree.getroot()
-
-for elem in root.iter():
-    tag = elem.tag.split("}")[-1]
-    if tag in ["path", "line", "circle", "ellipse", "polyline", "polygon"]:
-        print(f"<{tag}>")
-        for k, v in elem.attrib.items():
-            print(f"   {k}: {v}")
 
 # =========================
-# STEP 2: GEOMETRY EXTRACTION
+# Helpers
 # =========================
-paths, attributes = svg2paths(svg_file)
+def parse_svg_length(val):
+    return float(''.join(c for c in val if c.isdigit() or c == '.'))
 
-lines = []
-arcs = []
-curves = []
+def detect_view(cx, cy, W, H):
+    if cx < W/2 and cy < H/2:
+        return "F"      # Front
+    elif cx < W/2 and cy >= H/2:
+        return "B"      # Bottom
+    else:
+        return "L"      # Left
 
-for path in paths:
-    for seg in path:
-        if isinstance(seg, Line):
-            lines.append({
-                "start": (seg.start.real, seg.start.imag),
-                "end": (seg.end.real, seg.end.imag),
-                "length": seg.length()
-            })
+def classify_line(p1, p2, view, eps=1e-6):
+    dx = abs(p2[0] - p1[0])
+    dy = abs(p2[1] - p1[1])
 
-        elif isinstance(seg, Arc):
-            arcs.append({
-                "start": (seg.start.real, seg.start.imag),
-                "end": (seg.end.real, seg.end.imag),
-                "center": (seg.center.real, seg.center.imag),
-                "radius": seg.radius,
-                "sweep": seg.sweep
-            })
+    if dy < eps:
+        return "Px" if view in ["F", "B"] else "Pz"
+    elif dx < eps:
+        return "Py"
+    else:
+        return "Inclined"
 
-        elif isinstance(seg, (CubicBezier, QuadraticBezier)):
-            curves.append({
-                "type": type(seg).__name__,
-                "points": [(p.real, p.imag) for p in seg.bpoints()]
-            })
+def are_collinear(e1, e2, tol=1e-6):
+    p1, p2 = e1.points[0], e1.points[-1]
+    p3, p4 = e2.points[0], e2.points[-1]
 
-# =========================
-# STEP 3: PRINT EXTRACTED DATA
-# =========================
-print("\n================ EXTRACTED LINES ================\n")
-for i, l in enumerate(lines):
-    print(f"Line {i}: start={l['start']} end={l['end']} length={l['length']:.2f}")
+    def cross(a, b, c):
+        return abs((b[0]-a[0])*(c[1]-a[1]) -
+                   (b[1]-a[1])*(c[0]-a[0]))
 
-print("\n================ EXTRACTED ARCS ================\n")
-for i, a in enumerate(arcs):
-    print(f"Arc {i}:")
-    print(f"   start={a['start']}")
-    print(f"   end={a['end']}")
-    print(f"   center={a['center']}")
-    print(f"   radius={a['radius']}")
-    print(f"   sweep={a['sweep']}")
+    return cross(p1, p2, p3) < tol and cross(p1, p2, p4) < tol
 
-print("\n================ EXTRACTED CURVES ================\n")
-for i, c in enumerate(curves):
-    print(f"Curve {i}: type={c['type']} control_points={c['points']}")
+def merge_edges(edges):
+    merged = []
+    used = [False]*len(edges)
 
-# =========================
-# STEP 4: VISUAL VERIFICATION
-# =========================
-plt.figure(figsize=(8, 8))
+    for i, e in enumerate(edges):
+        if used[i]:
+            continue
 
-# Plot lines
-for l in lines:
-    x = [l["start"][0], l["end"][0]]
-    y = [l["start"][1], l["end"][1]]
-    plt.plot(x, y)
+        pts = e.points[:]
+        for j in range(i+1, len(edges)):
+            if used[j]:
+                continue
+            if (e.feature == edges[j].feature and
+                are_collinear(e, edges[j])):
+                pts += edges[j].points
+                used[j] = True
 
-# Plot arcs (sampled)
-for a in arcs:
-    cx, cy = a["center"]
-    rx, ry = a["radius"] if isinstance(a["radius"], tuple) else (a["radius"], a["radius"])
-    theta = np.linspace(0, 2 * np.pi, 300)
-    x = cx + rx * np.cos(theta)
-    y = cy + ry * np.sin(theta)
-    plt.plot(x, y, linestyle="--")
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        new_edge = Edge2D(
+            points=[(min(xs), min(ys)), (max(xs), max(ys))],
+            feature=e.feature,
+            view=e.view,
+            primitive=e.primitive
+        )
+        merged.append(new_edge)
 
-# Plot curves (sampled)
-for c in curves:
-    pts = np.array(c["points"])
-    plt.plot(pts[:, 0], pts[:, 1], linestyle=":")
+    return merged
 
-plt.gca().set_aspect("equal")
-plt.gca().invert_yaxis()  # VERY IMPORTANT for SVG coordinates
-plt.title("Extracted Geometry Overlay Check")
-plt.show()
 
 # =========================
-# FINAL SUMMARY
+# Step-1 Extraction
 # =========================
-print("\n================ SUMMARY ================\n")
-print(f"Total paths: {len(paths)}")
-print(f"Total lines: {len(lines)}")
-print(f"Total arcs: {len(arcs)}")
-print(f"Total curves: {len(curves)}")
+def extract_edges(svg_path):
+    paths, _, svg_attr = svg2paths2(svg_path)
+
+    W = parse_svg_length(svg_attr["width"])
+    H = parse_svg_length(svg_attr["height"])
+
+    views = {"F": [], "B": [], "L": []}
+
+    for path in paths:
+        for seg in path:
+            if isinstance(seg, Line):
+                pts = [(seg.start.real, seg.start.imag),
+                       (seg.end.real, seg.end.imag)]
+                primitive = "line"
+            elif isinstance(seg, Arc):
+                pm = seg.point(0.5)
+                pts = [(seg.start.real, seg.start.imag),
+                       (pm.real, pm.imag),
+                       (seg.end.real, seg.end.imag)]
+                primitive = "arc"
+            else:
+                continue
+
+            cx = sum(p[0] for p in pts)/len(pts)
+            cy = sum(p[1] for p in pts)/len(pts)
+            view = detect_view(cx, cy, W, H)
+
+            feature = classify_line(pts[0], pts[-1], view) if primitive == "line" else "Arc"
+
+            views[view].append(
+                Edge2D(pts, feature, view, primitive)
+            )
+
+    # merge collinear lines per view
+    for v in views:
+        lines = [e for e in views[v] if e.primitive == "line"]
+        arcs  = [e for e in views[v] if e.primitive == "arc"]
+        views[v] = merge_edges(lines) + arcs
+
+    return views
+
+
+# =========================
+# Verification Plot
+# =========================
+def plot_view(edges, title):
+    plt.figure()
+    for e in edges:
+        xs = [p[0] for p in e.points]
+        ys = [p[1] for p in e.points]
+        plt.plot(xs, ys, linewidth=2)
+        cx = sum(xs)/len(xs)
+        cy = sum(ys)/len(ys)
+        plt.text(cx, cy, e.feature, fontsize=9, color="red")
+    plt.title(title)
+    plt.axis("equal")
+    plt.grid(True)
+    plt.show()
+
+
+# =========================
+# RUN
+# =========================
+svg_path = r"YOUR_SVG_PATH_HERE.svg"
+
+views = extract_edges(svg_path)
+
+plot_view(views["F"], "Front View (X–Y)")
+plot_view(views["B"], "Bottom View (X–Z)")
+plot_view(views["L"], "Left View (Z–Y)")
