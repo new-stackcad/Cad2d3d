@@ -1,76 +1,121 @@
 from svgpathtools import svg2paths2, Line, Arc
 from dataclasses import dataclass
-import math
 
+# ===============================
+# Data structure (paper-faithful)
+# ===============================
 @dataclass
 class Edge2D:
-    points: list
-    bbox: tuple
-    feature: str
-    view: str
-    primitive: str
+    points: list            # [(x,y), ...]
+    bbox: tuple             # ((xu,yu),(xl,yl))
+    feature: str            # Px, Py, Pz, I, A
+    view: str               # F, B, L
+    primitive: str          # line / arc
+
+
+# ===============================
+# SVG utilities
+# ===============================
+def parse_svg_length(val):
+    """Convert '297mm' / '800px' → float"""
+    if val is None:
+        return None
+    return float(''.join(c for c in val if c.isdigit() or c == '.'))
+
 
 def bounding_box(points):
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     return ((min(xs), max(ys)), (max(xs), min(ys)))
 
+
+# ===============================
+# Feature classification
+# ===============================
 def classify_line(p1, p2, view, eps=1e-6):
     dx = abs(p2[0] - p1[0])
     dy = abs(p2[1] - p1[1])
 
     if dy < eps:
-        return "Px" if view in ["F","B"] else "Pz"
+        if view in ["F", "B"]:
+            return "Px"
+        else:
+            return "Pz"
     elif dx < eps:
         return "Py"
     else:
         return "I"
 
-def detect_view(cx, cy, w, h):
-    if cx < w/2 and cy < h/2:
-        return "F"
-    if cx < w/2 and cy > h/2:
-        return "B"
-    return "L"
 
+# ===============================
+# View detection (spatial)
+# ===============================
+def detect_view(cx, cy, W, H):
+    """
+    Assumes:
+    Front  → top-left
+    Bottom → bottom-left
+    Left   → right
+    """
+    if cx < W / 2 and cy < H / 2:
+        return "F"
+    elif cx < W / 2 and cy >= H / 2:
+        return "B"
+    else:
+        return "L"
+
+
+# ===============================
+# Main extraction function
+# ===============================
 def extract_edges(svg_path):
     paths, attrs, svg_attr = svg2paths2(svg_path)
-    W, H = float(svg_attr["width"]), float(svg_attr["height"])
+
+    W = parse_svg_length(svg_attr.get("width"))
+    H = parse_svg_length(svg_attr.get("height"))
+
+    if W is None or H is None:
+        raise ValueError("SVG width/height not found")
 
     E_f, E_b, E_l = [], [], []
 
     for path in paths:
         for seg in path:
-            pts = []
+
+            points = []
             primitive = None
 
+            # -------- LINE --------
             if isinstance(seg, Line):
                 p1 = (seg.start.real, seg.start.imag)
                 p2 = (seg.end.real, seg.end.imag)
-                pts = [p1, p2]
+                points = [p1, p2]
                 primitive = "line"
 
+            # -------- ARC --------
             elif isinstance(seg, Arc):
                 p1 = (seg.start.real, seg.start.imag)
                 p2 = (seg.end.real, seg.end.imag)
                 pm = seg.point(0.5)
-                pts = [p1, (pm.real, pm.imag), p2]
+                points = [p1, (pm.real, pm.imag), p2]
                 primitive = "arc"
 
             else:
                 continue
 
-            cx = sum(p[0] for p in pts) / len(pts)
-            cy = sum(p[1] for p in pts) / len(pts)
+            # centroid → view
+            cx = sum(p[0] for p in points) / len(points)
+            cy = sum(p[1] for p in points) / len(points)
             view = detect_view(cx, cy, W, H)
 
+            # feature
             if primitive == "line":
-                feature = classify_line(pts[0], pts[-1], view)
+                feature = classify_line(points[0], points[-1], view)
             else:
                 feature = "A"
 
-            bbox = bounding_box(pts)
-            edge = Edge2D(pts, bbox, feature, view, primitive)
+            bbox = bounding_box(points)
+            edge = Edge2D(points, bbox, feature, view, primitive)
 
             if view == "F":
                 E_f.append(edge)
@@ -80,3 +125,20 @@ def extract_edges(svg_path):
                 E_l.append(edge)
 
     return E_f, E_b, E_l
+
+
+# ===============================
+# RUN
+# ===============================
+if __name__ == "__main__":
+    svg_path = r"C:\Users\inp_madhupranavi\OneDrive - Ashok Leyland Ltd\Desktop\AL\Code_Trial\00000145.svg"
+
+    E_f, E_b, E_l = extract_edges(svg_path)
+
+    print("Front edges :", len(E_f))
+    print("Bottom edges:", len(E_b))
+    print("Left edges  :", len(E_l))
+
+    if E_f:
+        print("\nSample Front Edge:")
+        print(E_f[0])
